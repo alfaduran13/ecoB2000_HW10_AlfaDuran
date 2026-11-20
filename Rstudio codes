@@ -1,0 +1,96 @@
+library(tidyverse)
+library(standardize)
+library(randomForest)
+library(e1071)
+library(glmnet)
+
+load("C:/Users/alfad/Downloads/acs2021_recoded (2).RData")
+
+householders <- acs2021 %>%
+  filter(RELATE == 1) %>%
+  select(SAMPLE, SERIAL, AGE, SEX, EDUC) %>%
+  rename(h_age = AGE, h_sex = SEX, h_educ = EDUC)
+
+acs2021_couples <- acs2021 %>%
+  filter(RELATE == 2) %>%
+  inner_join(householders, by = c("SAMPLE", "SERIAL"))
+
+acs2021_couples$age_diff <- acs2021_couples$AGE - acs2021_couples$h_age
+trad_data <- acs2021_couples %>% filter(SEX == "Female", h_sex == "Male")
+trad_data$he_more_than_7yrs_than_her <- as.numeric(trad_data$age_diff < -7)
+
+dat_use <- trad_data
+dat_use$State_factor <- as.factor(dat_use$STATEFIP)
+
+d_y_varb <- data.frame(model.matrix(~ dat_use$he_more_than_7yrs_than_her))
+d_educ_hs <- data.frame(model.matrix(~ dat_use$educ_hs))
+d_educ_somecoll <- data.frame(model.matrix(~ dat_use$educ_somecoll))
+d_educ_college <- data.frame(model.matrix(~ dat_use$educ_college))
+d_educ_advdeg <- data.frame(model.matrix(~ dat_use$educ_advdeg))
+d_age <- data.frame(model.matrix(~ dat_use$AGE))
+d_State <- data.frame(model.matrix(~ dat_use$State_factor))
+
+dat_for_analysis_sub <- data.frame(
+  d_y_varb[,2], d_educ_hs[,2], d_educ_somecoll[,2],
+  d_educ_college[,2], d_educ_advdeg[,2], d_age[,2],
+  d_State[,2:ncol(d_State)]
+)
+names(dat_for_analysis_sub) <- sub("dat_use.", "", names(dat_for_analysis_sub), fixed = TRUE)
+names(dat_for_analysis_sub) <- sub("factor", "", names(dat_for_analysis_sub), fixed = TRUE)
+names(dat_for_analysis_sub)[1:6] <- c("he_more_than_7yrs_than_her", "HS", "SomeColl", "College", "AdvDeg", "Age")
+dat_for_analysis_sub <- na.omit(dat_for_analysis_sub)
+
+set.seed(654321)
+NN <- nrow(dat_for_analysis_sub)
+restrict_1 <- runif(NN) < 0.1
+dat_train <- subset(dat_for_analysis_sub, restrict_1)
+dat_test <- subset(dat_for_analysis_sub, !restrict_1)
+formula_sobj <- reformulate(names(dat_for_analysis_sub)[-1], response = "he_more_than_7yrs_than_her")
+sobj <- standardize(formula_sobj, dat_train, family = binomial)
+s_dat_test <- predict(sobj, dat_test)
+y_test <- dat_test$he_more_than_7yrs_than_her
+
+model_lpm1 <- lm(sobj$formula, data = sobj$data)
+summary(model_lpm1)
+pred_vals_lpm <- predict(model_lpm1, s_dat_test)
+pred_model_lpm1 <- pred_vals_lpm > mean(pred_vals_lpm)
+table(pred = pred_model_lpm1, true = y_test)
+
+model_logit1 <- glm(sobj$formula, family = binomial, data = sobj$data)
+summary(model_logit1)
+pred_vals <- predict(model_logit1, s_dat_test, type = "response")
+pred_model_logit1 <- pred_vals > mean(pred_vals)
+table(pred = pred_model_logit1, true = y_test)
+
+set.seed(54321)
+model_randFor <- randomForest(
+  as.factor(he_more_than_7yrs_than_her) ~ .,
+  data = sobj$data, importance = TRUE, proximity = FALSE, ntree = 100
+)
+print(model_randFor)
+round(importance(model_randFor), 2)
+varImpPlot(model_randFor)
+pred_model1 <- predict(model_randFor, s_dat_test)
+table(pred = pred_model1, true = y_test)
+
+# SVM can take a long time with this sample.
+# svm.model <- svm(as.factor(he_more_than_7yrs_than_her) ~ ., data = sobj$data, cost = 1, gamma = 0.1)
+# svm.pred <- predict(svm.model, s_dat_test)
+# table(pred = svm.pred, true = y_test)
+
+x_train <- as.matrix(sobj$data[, -1])
+y_train <- sobj$data$he_more_than_7yrs_than_her
+x_test <- as.matrix(s_dat_test[, colnames(x_train), drop = FALSE])
+
+set.seed(54321)
+model1_elasticnet <- glmnet(x_train, y_train, family = "binomial", alpha = 1)
+plot(model1_elasticnet, label = TRUE)
+cvmodel1_elasticnet <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 1)
+cvmodel1_elasticnet$lambda.min
+coef(cvmodel1_elasticnet, s = "lambda.min")
+pred1_elasnet <- predict(cvmodel1_elasticnet, newx = x_test, s = "lambda.min", type = "response")
+pred_model1_elasnet <- pred1_elasnet > mean(pred1_elasnet)
+table(pred = pred_model1_elasnet, true = y_test)
+
+model2_elasticnet <- glmnet(x_train, y_train, family = "binomial", alpha = 0)
+print(model2_elasticnet)
